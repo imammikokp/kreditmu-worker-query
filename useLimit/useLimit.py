@@ -193,11 +193,45 @@ if customer_limit_data is None:
     print("Customer limit data not found.")
     sys.exit(1)
 
-# step 10
+# step 10 - 12
 print(f"""SELECT count(*) FROM "mutations" WHERE mutations.prospect_id = {job_payload_use_limit.TaskPayload.ProspectID} AND mutations.transaction_type = 'USE_LIMIT' AND mutations.status = 'DB'""")
- 
 # return 
 count = 0
+
+if count >0:
+    print("ROLLBACK")
+    print("Use limit mutation already exists.")
+    sys.exit(1)
+
+# step 15
+def find_limit_tenor_for_use_limit(tenor: int, customer_limit: CustomerLimitData) -> float:
+    limit_tenor = 0.0
+    if tenor == 1:
+        if customer_limit.tenor_1_remaining_limit > 0:
+            limit_tenor = customer_limit.tenor_1_remaining_limit
+    elif tenor == 3:
+        if customer_limit.tenor_3_remaining_limit > 0:
+            limit_tenor = customer_limit.tenor_3_remaining_limit
+    elif tenor == 6:
+        if customer_limit.tenor_6_remaining_limit > 0:
+            limit_tenor = customer_limit.tenor_6_remaining_limit
+    elif tenor == 12:
+        if customer_limit.tenor_12_remaining_limit > 0:
+            limit_tenor = customer_limit.tenor_12_remaining_limit
+    else:
+        raise ValueError("limit tenor not found")
+    return limit_tenor
+
+# Jalankan fungsi find_limit_tenor_for_use_limit
+tenor = job_payload_use_limit.TaskPayload.Tenor
+limit = find_limit_tenor_for_use_limit(tenor, customer_limit_data)
+print(f"Limit for tenor {tenor}: {limit}")
+
+
+
+
+
+
 
 
 

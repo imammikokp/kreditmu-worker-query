@@ -198,12 +198,14 @@ print(f"""SELECT count(*) FROM "mutations" WHERE mutations.prospect_id = {job_pa
 # return 
 count = 0
 
+# step 15
 if count >0:
+    # step 16
     print("ROLLBACK")
     print("Use limit mutation already exists.")
     sys.exit(1)
 
-# step 15
+# step 18
 def find_limit_tenor_for_use_limit(tenor: int, customer_limit: CustomerLimitData) -> float:
     limit_tenor = 0.0
     if tenor == 1:
@@ -222,20 +224,149 @@ def find_limit_tenor_for_use_limit(tenor: int, customer_limit: CustomerLimitData
         raise ValueError("limit tenor not found")
     return limit_tenor
 
-# Jalankan fungsi find_limit_tenor_for_use_limit
+# Jalankan fungsi 
+# STEP 18
 tenor = job_payload_use_limit.TaskPayload.Tenor
 limit = find_limit_tenor_for_use_limit(tenor, customer_limit_data)
 print(f"Limit for tenor {tenor}: {limit}")
 
+remaining = limit - job_payload_use_limit.TaskPayload.Amount
 
 
+# step 19 - 20
+@dataclass
+class Mutation:
+    customer_id: int
+    prospect_id: str
+    agreement_no: str
+    contract_status: str
+    go_live_date: Optional[datetime]
+    amount: float
+    status: str
+    is_first_trx_after_category: bool
+    application_source_id: str
+    transaction_type: str
+    tenor: int
+    previous_limit_amount: float
+    remaining_limit_amount: float
+    source_cut_limit: str
+    created_by: str
+    category_limit_id: Optional[int]
+
+# konstruksi objek
+mutation_obj = Mutation(
+    customer_id=job_payload_use_limit.CustomerID,
+    prospect_id=job_payload_use_limit.TaskPayload.ProspectID,
+    agreement_no=job_payload_use_limit.TaskPayload.AgreementNumber,
+    contract_status=job_payload_use_limit.TaskPayload.ContractStatus,
+    go_live_date=job_payload_use_limit.TaskPayload.GoLiveDate,
+    amount=job_payload_use_limit.TaskPayload.Amount,
+    status="DB",
+    is_first_trx_after_category=False,
+    application_source_id=job_payload_use_limit.TaskPayload.ApplicationSource,
+    transaction_type="USE_LIMIT",
+    tenor=job_payload_use_limit.TaskPayload.Tenor,
+    previous_limit_amount=limit,
+    remaining_limit_amount=remaining,
+    source_cut_limit=job_payload_use_limit.TaskPayload.SourceProcess,
+    created_by="WORKER",
+    category_limit_id=customer_limit_data.category_limit_id,
+)
+
+print(f"""INSERT INTO "mutations" ("customer_id","prospect_id","agreement_no","contract_status","go_live_date","amount","status","is_first_trx_after_category","application_source_id","transaction_type","tenor","previous_limit_amount","remaining_limit_amount","source_cut_limit","category_limit_id","created_by") VALUES ({mutation_obj.customer_id},{mutation_obj.prospect_id},{mutation_obj.agreement_no},{mutation_obj.contract_status},{mutation_obj.go_live_date},{mutation_obj.amount},{mutation_obj.status},{mutation_obj.is_first_trx_after_category},{mutation_obj.application_source_id},{mutation_obj.transaction_type},{mutation_obj.tenor},{mutation_obj.previous_limit_amount},{mutation_obj.remaining_limit_amount},{mutation_obj.source_cut_limit},{mutation_obj.category_limit_id},{mutation_obj.created_by}) RETURNING "id";""")
+
+# Step 22
+@dataclass
+class CalculateLimitRequest:
+    tenor1_gross_limit_amount: float
+    tenor1_remaining_limit: float
+    tenor3_gross_limit_amount: float
+    tenor3_remaining_limit: float
+    tenor6_gross_limit_amount: float
+    tenor6_remaining_limit: float
+    tenor12_gross_limit_amount: float
+    tenor12_remaining_limit: float
 
 
+def calculate_limit(tenor: int, net_transaction: float, min_tenor1: float, body: CalculateLimitRequest) -> CalculateLimitRequest:
+	# khusus untuk logic pemotongan limit worker, tidak ada penjagaan mengenai kecukupan limit konsumen, karena pemotongan limit
+	# via worker hanya memproses dari pengajuan limit manual confins, jadi memungkinkan terjadi over limit
 
+	# Jika transaksi WG / selain tenor 1
+    if tenor != 1:
+        tenor12_current_limit = body.tenor12_remaining_limit - net_transaction
+        body.tenor12_remaining_limit = tenor12_current_limit
 
+        tenor6_current_limit = body.tenor6_remaining_limit - net_transaction
+        body.tenor6_remaining_limit = tenor6_current_limit
 
+        tenor3_current_limit = body.tenor3_remaining_limit - net_transaction
+        body.tenor3_remaining_limit = tenor3_current_limit
 
+        # Kalkulasi untuk net limit tenor 1
+        if tenor6_current_limit < body.tenor1_remaining_limit:
+            body.tenor1_remaining_limit = tenor6_current_limit
 
+    if tenor == 1:
+        # Transaksi DG
+        if net_transaction < min_tenor1:
+            raise ValueError("error reject transaction")
+        if net_transaction <= body.tenor1_remaining_limit:
+            res1 = body.tenor1_remaining_limit - net_transaction
+            res3 = body.tenor3_remaining_limit - net_transaction
+            res6 = body.tenor6_remaining_limit - net_transaction
+            res12 = body.tenor12_remaining_limit - net_transaction
 
+            body.tenor1_remaining_limit = res1
+            body.tenor3_remaining_limit = res3
+            body.tenor6_remaining_limit = res6
+            body.tenor12_remaining_limit = res12
 
+    return body
 
+calculate_limit_request = CalculateLimitRequest(
+    tenor1_gross_limit_amount=customer_limit_data.tenor_1_gross_limit_amount,
+    tenor1_remaining_limit=customer_limit_data.tenor_1_remaining_limit,
+    tenor3_gross_limit_amount=customer_limit_data.tenor_3_gross_limit_amount,
+    tenor3_remaining_limit=customer_limit_data.tenor_3_remaining_limit,
+    tenor6_gross_limit_amount=customer_limit_data.tenor_6_gross_limit_amount,
+    tenor6_remaining_limit=customer_limit_data.tenor_6_remaining_limit,
+    tenor12_gross_limit_amount=customer_limit_data.tenor_12_gross_limit_amount,
+    tenor12_remaining_limit=customer_limit_data.tenor_12_remaining_limit,
+)
+
+newLimit=calculate_limit(
+    tenor=job_payload_use_limit.TaskPayload.Tenor,
+    net_transaction=job_payload_use_limit.TaskPayload.Amount,
+    min_tenor1=job_payload_use_limit.TenorLimitCaps.MinLimit,
+    body=calculate_limit_request,
+)
+
+# step 23-24
+print(f"""
+UPDATE "customer_limit"
+SET
+  "tenor_12_gross_limit_amount" = {newLimit.tenor12_gross_limit_amount},
+  "tenor_12_remaining_limit"    = {newLimit.tenor12_remaining_limit},
+  "tenor_1_gross_limit_amount"  = {newLimit.tenor1_gross_limit_amount},
+  "tenor_1_remaining_limit"     = {newLimit.tenor1_remaining_limit},
+  "tenor_3_gross_limit_amount"  = {newLimit.tenor3_gross_limit_amount},
+  "tenor_3_remaining_limit"     = {newLimit.tenor3_remaining_limit},
+  "tenor_6_gross_limit_amount"  = {newLimit.tenor6_gross_limit_amount},
+  "tenor_6_remaining_limit"     = {newLimit.tenor6_remaining_limit},
+  "updated_at"                  = {datetime.now()},
+  "updated_by"                  = "WORKER",
+WHERE customer_limit.id = {customer_limit_data.id};
+""")
+
+# step 26
+print(f"""
+UPDATE "AgreementSyncKreditmu"
+SET
+  "DtmProcess" = true,
+  "IsProcess"  = {datetime.now()}
+WHERE ID = {job_payload_use_limit.TaskPayload.ID};
+""")
+
+# step 29
+print("commit")

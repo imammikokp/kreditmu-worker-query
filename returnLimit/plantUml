@@ -1,0 +1,102 @@
+@startuml
+title ReturnLimit Sequence (no BeegoCtx)
+
+autonumber
+actor Client
+participant "customerLimitUseCase" as UseCase
+participant "Gorm DB (Transaction)" as DB
+participant "CustomerLimitRepository" as CustRepo
+participant "MutationRepository" as MutRepo
+participant "LimitCalculation" as Calc
+participant "ZapLogger" as Logger
+participant "Tenor Config" as TenorCfg
+
+Client -> UseCase: ReturnLimit(beegoCtx, body)
+UseCase -> UseCase: Resolve authUser (authInfo or "SYSTEM")
+UseCase -> DB: DB().Transaction(func(tx))
+activate DB
+
+UseCase -> CustRepo: singleWithFilterTx(ctx, tx, "customer_limit.customer_id = ?", body.CustomerID)
+alt customer not found / error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> MutRepo: CountMutationByProspectIdAndTransactionTypeAndStatus(ctx, body.ProspectID, "RETURN_LIMIT", "CR")
+alt error counting
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+else count > 0
+    UseCase -> Logger: SetMessageLog(ErrTransactionAlreadyExist)
+    UseCase --> Client: ErrTransactionAlreadyExist
+    deactivate DB
+    return
+end
+
+UseCase -> MutRepo: SingleWithFilter(ctx, "*", ..., "prospect_id=?, customer_id=?, type=USE_LIMIT, status=DB")
+alt not found
+    UseCase -> Logger: SetMessageLog(ErrTransactionNotFound)
+    UseCase --> Client: ErrTransactionNotFound
+    deactivate DB
+    return
+else other error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> UseCase: Validate amount (mutation.Amount == *body.Amount)
+alt amount mismatch
+    UseCase -> Logger: SetMessageLog(ErrInvalidReturnAmount)
+    UseCase --> Client: ErrInvalidReturnAmount
+    deactivate DB
+    return
+end
+
+UseCase -> UseCase: Map customer limits to 'limit'
+UseCase -> Calc: NewLimitCalculation(tx, body.CustomerID, body.ProspectID, mutation.Tenor.Int32, *body.Amount)
+UseCase -> Calc: CalculateReturnLimit(ctx, gross & remaining)
+alt calculation error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> UseCase: findLimitTenorForReturnLimit(mutation.Tenor, customerMapped)
+UseCase -> UseCase: findNewLimitReturnLimit(mutation.Tenor, newLimit)
+
+UseCase -> MutRepo: StoreTx(ctx, tx, Mutation{TransactionType=RETURN_LIMIT, Status=CR, ...})
+alt insert error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> CustRepo: UpdateSelectedFieldWithTx(ctx, tx, fields, updateCustomerLimit, customer.ID)
+alt update error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> TenorCfg: findTenorConfig(ctx)
+alt config error
+    UseCase -> Logger: SetMessageLog(err)
+    UseCase --> Client: error
+    deactivate DB
+    return
+end
+
+UseCase -> UseCase: hideLimitBalance(newLimit, cfg.HideLimit.T1,T3,T6,T12)
+UseCase -> DB: Commit
+deactivate DB
+UseCase --> Client: *domain.CalculateLimitRequest (remaining limits)
+@enduml

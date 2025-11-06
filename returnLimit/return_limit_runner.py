@@ -23,7 +23,6 @@ from hide_limit import hide_limit_balance
 
 
 def preview_return_limit_sql():
-    # Step 1: Client calls ReturnLimit & resolve auth user (SYSTEM)
     job_payload_use_limit = JobPayloadUseLimit(
         customer_id=1,
         queue_name="UseLimitQueue",
@@ -81,10 +80,8 @@ def preview_return_limit_sql():
         updated_at=None,
     )
 
-    # Step 2: Start DB transaction
     print("BEGIN;")
 
-    # Step 3: Fetch customer_limit FOR UPDATE (singleWithFilterTx)
     sql_customer_limit = """
 SELECT
   customer_limit.id,
@@ -129,7 +126,6 @@ FOR UPDATE;
     print(sql_customer_limit)
     print("params =", params_customer_limit)
 
-    # Step 4: Count RETURN_LIMIT mutations (CountMutationByProspectIdAndTransactionTypeAndStatus)
     sql_count_return_limit = """
 SELECT count(*)
 FROM "mutations"
@@ -144,13 +140,11 @@ WHERE prospect_id = %s
     print("params =", params_count_return_limit)
 
     countmutations = 0
-    # Step 5: Handle existing mutation (if count > 0)
     if countmutations > 0:
         print("ROLLBACK;")
         print("[ERROR] Mutation already exist")
         return
 
-    # Step 6: Select USE_LIMIT mutation (SingleWithFilter status=DB)
     sql_select_use_limit = """
 SELECT *
 FROM "mutations"
@@ -172,7 +166,6 @@ LIMIT 1;
     print(sql_select_use_limit)
     print("params =", params_select_use_limit)
 
-    # Step 7: Build mutation object from USE_LIMIT record
     mutation_obj = Mutation(
         id=1,
         customer_id=return_limit_request.customer_id,
@@ -191,13 +184,11 @@ LIMIT 1;
         previous_limit_amount=customer_limit_obj.tenor_1_remaining_limit,
     )
 
-    # Step 8: Validate amount (use == return)
     if mutation_obj.amount != return_limit_request.amount:
         print("ROLLBACK;")
         print("[ERROR] Invalid return amount (use != return)")
         return
 
-    # Step 9: Map customer limits to 'limit' snapshot
     tenor_1_gross = customer_limit_obj.tenor_1_gross_limit_amount
     tenor_3_gross = customer_limit_obj.tenor_3_gross_limit_amount
     tenor_6_gross = customer_limit_obj.tenor_6_gross_limit_amount
@@ -208,50 +199,38 @@ LIMIT 1;
     tenor_6_remaining = customer_limit_obj.tenor_6_remaining_limit
     tenor_12_remaining = customer_limit_obj.tenor_12_remaining_limit
 
-    # Step 10: NewLimitCalculation and CalculateReturnLimit
     calculation = LimitCalculation(
         customer_id=return_limit_request.customer_id,
         prospect_id=return_limit_request.prospect_id,
         tenor=mutation_obj.tenor,
         amount=return_limit_request.amount,
     )
-    calc_result = calculation.calculate_return_limit(
+    calc_result = calculation.calculate_return_limit_go_style(
         tenor_1_gross=tenor_1_gross,
         tenor_3_gross=tenor_3_gross,
         tenor_6_gross=tenor_6_gross,
         tenor_12_gross=tenor_12_gross,
-        tenor_1_remaining=tenor_1_remaining,
         tenor_3_remaining=tenor_3_remaining,
         tenor_6_remaining=tenor_6_remaining,
         tenor_12_remaining=tenor_12_remaining,
     )
 
-    # Step 11: findLimitTenorForReturnLimit & findNewLimitReturnLimit
     previous_limit_amount = find_limit_tenor_for_return_limit(mutation_obj.tenor, customer_limit_obj)
     new_remaining_for_tenor = find_new_limit_return_limit(mutation_obj.tenor, calc_result)
 
-    # Step 12: Load tenor config (hide limits)
-    sql_select_tenor_config = """
-SELECT tenor, min_net_limit_visible
-FROM "m_tenor"
-WHERE "m_tenor"."deleted_at" IS NULL
-ORDER BY tenor;
-"""
-    print("\n[RAW SQL] SELECT m_tenor config (hide limits):")
-    print(sql_select_tenor_config)
-    print("params = []")
+    # Ambil konfigurasi tenor dari m_tenor, mencetak raw SQL (tanpa error handling)
+    # tenor_cfg = calculation.find_tenor_config()
+    # # Bentuk konfigurasi hide limit sesuai hasil query
+    # hide_cfg = TenorHideLimit(
+    #     tenor_1=tenor_cfg.get(1, {}).get("hide_limit", 0.0),
+    #     tenor_3=tenor_cfg.get(3, {}).get("hide_limit", 0.0),
+    #     tenor_6=tenor_cfg.get(6, {}).get("hide_limit", 0.0),
+    #     tenor_12=tenor_cfg.get(12, {}).get("hide_limit", 0.0),
+    # )
 
-    # Step 13: hideLimitBalance(newLimit, cfg.HideLimit.T1,T3,T6,T12)
-    hide_cfg = TenorHideLimit(tenor_1=100.0, tenor_3=100.0, tenor_6=100.0, tenor_12=100.0)
-    hidden_result = hide_limit_balance(
-        calc_result,
-        h1=hide_cfg.tenor_1,
-        h3=hide_cfg.tenor_3,
-        h6=hide_cfg.tenor_6,
-        h12=hide_cfg.tenor_12,
-    )
 
-    # Step 14: Store RETURN_LIMIT mutation (insert)
+    # hidden_result = hide_limit_balance(calc_result, h1=hide_cfg.tenor_1, h3=hide_cfg.tenor_3, h6=hide_cfg.tenor_6, h12=hide_cfg.tenor_12)
+
     sql_insert_return_limit = """
 INSERT INTO "mutations" (
   customer_id,
@@ -294,7 +273,6 @@ INSERT INTO "mutations" (
     print(sql_insert_return_limit)
     print("params =", params_insert_return_limit)
 
-    # Step 15: UpdateSelectedFieldWithTx (update customer_limit)
     sql_update_customer_limit = """
 UPDATE "customer_limit" SET
   tenor_1_gross_limit_amount = %s,
@@ -311,13 +289,13 @@ WHERE id = %s;
 """
     params_update_customer_limit = [
         tenor_1_gross,
-        hidden_result.tenor_1_remaining_limit,
+        calc_result.tenor_1_remaining_limit,
         tenor_3_gross,
-        hidden_result.tenor_3_remaining_limit,
+        calc_result.tenor_3_remaining_limit,
         tenor_6_gross,
-        hidden_result.tenor_6_remaining_limit,
+        calc_result.tenor_6_remaining_limit,
         tenor_12_gross,
-        hidden_result.tenor_12_remaining_limit,
+        calc_result.tenor_12_remaining_limit,
         datetime.now(timezone.utc),
         "SYSTEM",
         customer_limit_obj.id,
@@ -326,7 +304,6 @@ WHERE id = %s;
     print(sql_update_customer_limit)
     print("params =", params_update_customer_limit)
 
-    # Step 16: Commit transaction and respond with CalculateLimitRequest
     print("COMMIT;")
 
 

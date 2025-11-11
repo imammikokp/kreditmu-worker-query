@@ -105,8 +105,12 @@ class JobPayloadUseLimit:
     TaskPayload: UseLimitTaskPayload
 
 # mapping dari producer
+print("""
+SELECT * FROM "m_tenors" WHERE description = 1 AND "m_tenor"."deleted_at" IS NULL ORDER BY "m_tenor"."id" LIMIT 1
+""")
 
-# diambil dari config service
+# return
+description = 1
 minTenor1 = 150000.0
 maxTenor1 = 500000.0
 
@@ -115,7 +119,7 @@ job_payload_use_limit = JobPayloadUseLimit(
     CustomerID=int(use_limit_data.CustomerIDCore),
     QueueName="useLimitManual",
     TenorLimitCaps=TenorLimitCaps(
-        Tenor=1,  # Dummy, atau dari use_limit_data.Tenor
+        Tenor=description,  # dari use_limit_data.Tenor
         MinLimit=minTenor1,
         MaxLimit=maxTenor1,
     ),
